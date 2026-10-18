@@ -31,6 +31,8 @@ const (
 	PID_STREAMDECK_MINI     = 0x0063
 	PID_STREAMDECK_MINI_MK2 = 0x0090
 	PID_STREAMDECK_XL       = 0x006c
+	PID_STREAMDECK_XL_V2    = 0x008f
+	PID_STREAMDECK_PLUS     = 0x0084
 )
 
 // Firmware command IDs.
@@ -61,6 +63,7 @@ type Device struct {
 	featureReportSize   int
 	firmwareOffset      int
 	keyStateOffset      int
+	reportTypeOffset    int // offset of the input report type byte, 0 if the device has none
 	translateKeyIndex   func(index, columns uint8) uint8
 	imagePageSize       int
 	imagePageHeaderSize int
@@ -171,7 +174,7 @@ func Devices() ([]Device, error) {
 				resetCommand:         c_REV2_RESET,
 				setBrightnessCommand: c_REV2_BRIGHTNESS,
 			}
-		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK_XL:
+		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_XL || d.ProductID == PID_STREAMDECK_XL_V2):
 			dev = Device{
 				ID:                   d.Path,
 				Serial:               d.Serial,
@@ -189,6 +192,30 @@ func Devices() ([]Device, error) {
 				imagePageHeaderSize:  8,
 				imagePageHeader:      rev2ImagePageHeader,
 				flipImage:            flipHorizontallyAndVertically,
+				toImageFormat:        toJPEG,
+				getFirmwareCommand:   c_REV2_FIRMWARE,
+				resetCommand:         c_REV2_RESET,
+				setBrightnessCommand: c_REV2_BRIGHTNESS,
+			}
+		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK_PLUS:
+			dev = Device{
+				ID:                   d.Path,
+				Serial:               d.Serial,
+				Columns:              4,
+				Rows:                 2,
+				Keys:                 8,
+				Pixels:               120,
+				DPI:                  166,
+				Padding:              16,
+				featureReportSize:    32,
+				firmwareOffset:       6,
+				keyStateOffset:       4,
+				reportTypeOffset:     1,
+				translateKeyIndex:    identity,
+				imagePageSize:        1024,
+				imagePageHeaderSize:  8,
+				imagePageHeader:      rev2ImagePageHeader,
+				flipImage:            noFlip,
 				toImageFormat:        toJPEG,
 				getFirmwareCommand:   c_REV2_FIRMWARE,
 				resetCommand:         c_REV2_RESET,
@@ -278,6 +305,13 @@ func (d *Device) ReadKeys() (chan Key, error) {
 			d.sleepMutex.Lock()
 			d.lastActionTime = time.Now()
 			d.sleepMutex.Unlock()
+
+			// ignore non-key input reports (e.g. dials and touchscreen on the
+			// Stream Deck+), restoring the last known key state
+			if d.reportTypeOffset > 0 && keyBuffer[d.reportTypeOffset] != 0x00 {
+				copy(keyBuffer[d.keyStateOffset:], d.keyState)
+				continue
+			}
 
 			for i := d.keyStateOffset; i < len(keyBuffer); i++ {
 				keyIndex := uint8(i - d.keyStateOffset)
@@ -500,6 +534,11 @@ func toRGBA(img image.Image) *image.RGBA {
 	out := image.NewRGBA(img.Bounds())
 	draw.Copy(out, image.Pt(0, 0), img, img.Bounds(), draw.Src, nil)
 	return out
+}
+
+// noFlip returns the given image unchanged.
+func noFlip(img image.Image) image.Image {
+	return img
 }
 
 // flipHorizontally returns the given image horizontally flipped.
