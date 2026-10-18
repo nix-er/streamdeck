@@ -77,7 +77,7 @@ type Device struct {
 
 	keyState []byte
 
-	device *hid.Device
+	device hid.Device
 	info   hid.DeviceInfo
 
 	lastActionTime time.Time
@@ -100,7 +100,10 @@ type Key struct {
 func Devices() ([]Device, error) {
 	dd := []Device{}
 
-	devs := hid.Enumerate(VID_ELGATO, 0)
+	devs, err := hid.Enumerate(VID_ELGATO, 0)
+	if err != nil {
+		return nil, err
+	}
 	for _, d := range devs {
 		var dev Device
 
