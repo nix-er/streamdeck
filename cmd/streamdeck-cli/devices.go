@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/muesli/coral"
-	"github.com/muesli/streamdeck"
+	"github.com/nix-er/streamdeck"
 )
 
 var (

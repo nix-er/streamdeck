@@ -1,4 +1,4 @@
-module github.com/muesli/streamdeck
+module github.com/nix-er/streamdeck
 
 go 1.26.0
 

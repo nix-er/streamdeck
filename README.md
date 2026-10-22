@@ -2,24 +2,24 @@
 
 [![Latest Release](https://img.shields.io/github/release/muesli/streamdeck.svg?style=for-the-badge)](https://github.com/muesli/streamdeck/releases)
 [![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=for-the-badge)](/LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/muesli/streamdeck/build.yml?branch=master&style=for-the-badge)](https://github.com/muesli/streamdeck/actions)
-[![Go ReportCard](https://goreportcard.com/badge/github.com/muesli/streamdeck?style=for-the-badge)](https://goreportcard.com/report/muesli/streamdeck)
-[![Go Doc](https://img.shields.io/badge/godoc-reference-blue.svg?style=for-the-badge)](https://pkg.go.dev/github.com/muesli/streamdeck)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/nix-er/streamdeck/build.yml?branch=master&style=for-the-badge)](https://github.com/nix-er/streamdeck/actions)
+[![Go ReportCard](https://goreportcard.com/badge/github.com/nix-er/streamdeck?style=for-the-badge)](https://goreportcard.com/report/nix-er/streamdeck)
+[![Go Doc](https://img.shields.io/badge/godoc-reference-blue.svg?style=for-the-badge)](https://pkg.go.dev/github.com/nix-er/streamdeck)
 
 A CLI application and Go library to control your Elgato Stream Deck on Linux.
 
 If you're looking for a complete Linux service to control your StreamDeck, check
-out [Deckmaster](https://github.com/muesli/deckmaster), which is based on this
+out [Deckmaster](https://github.com/nix-er/deckmaster), which is based on this
 library.
 
 ## Installation
 
-Make sure you have a working Go environment (Go 1.12 or higher is required).
+Make sure you have a working Go environment (Go 1.26 or higher is required).
 See the [install instructions](http://golang.org/doc/install.html).
 
 To install streamdeck, simply run:
 
-    go get github.com/muesli/streamdeck
+    go get github.com/nix-er/streamdeck
 
 ## Configuration
 
