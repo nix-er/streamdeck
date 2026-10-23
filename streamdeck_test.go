@@ -71,6 +71,13 @@ func TestParseInputPlus(t *testing.T) {
 	}
 }
 
+func TestParseInputShortReport(t *testing.T) {
+	d := plusDevice()
+	if got := d.parseInput([]byte{0x01, inputTypeTouch, 0, 0, 1}); got != nil {
+		t.Errorf("got %#v for a truncated report, want no events", got)
+	}
+}
+
 func TestParseInputWithoutReportType(t *testing.T) {
 	// e.g. Stream Deck XL: every input report is a key report
 	d := &Device{

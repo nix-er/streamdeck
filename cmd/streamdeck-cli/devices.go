@@ -11,7 +11,7 @@ var (
 	devicesCmd = &coral.Command{
 		Use:   "devices",
 		Short: "devices lists all available Stream Deck devices",
-		RunE: func(cmd *coral.Command, args []string) error {
+		RunE: func(_ *coral.Command, _ []string) error {
 			_ = d.Close()
 
 			devs, err := streamdeck.Devices()

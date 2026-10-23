@@ -18,7 +18,7 @@ var (
 	imageCmd = &coral.Command{
 		Use:   "image <key> <image>",
 		Short: "sets an image on a key",
-		RunE: func(cmd *coral.Command, args []string) error {
+		RunE: func(_ *coral.Command, args []string) error {
 			if len(args) < 2 {
 				return fmt.Errorf("image requires the key-index and an image")
 			}

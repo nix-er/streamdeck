@@ -8,7 +8,7 @@ var (
 	clearCmd = &coral.Command{
 		Use:   "clear",
 		Short: "clears all images",
-		RunE: func(cmd *coral.Command, args []string) error {
+		RunE: func(_ *coral.Command, _ []string) error {
 			return d.Clear()
 		},
 	}

@@ -1,3 +1,4 @@
+// Package streamdeck controls Elgato Stream Deck devices.
 package streamdeck
 
 import (
@@ -349,7 +350,8 @@ func (d Device) FirmwareVersion() (string, error) {
 	return strings.TrimRight(string(result[d.firmwareOffset:]), "\x00 "), nil
 }
 
-// Resets the Stream Deck, clears all button images and shows the standby image.
+// Reset resets the Stream Deck, clears all button images and shows the standby
+// image.
 func (d Device) Reset() error {
 	return d.sendFeatureReport(d.resetCommand)
 }
@@ -451,6 +453,14 @@ func (d *Device) ReadInput() (chan Event, error) {
 // parseInput turns an input report into events, updating the known key and
 // dial states.
 func (d *Device) parseInput(buf []byte) []Event {
+	required := d.keyStateOffset + len(d.keyState)
+	if d.reportTypeOffset > 0 {
+		required = max(required, dialStateOffset+len(d.dialState), touchReportSize)
+	}
+	if len(buf) < required {
+		return nil
+	}
+
 	inputType := byte(inputTypeKeys)
 	if d.reportTypeOffset > 0 {
 		inputType = buf[d.reportTypeOffset]
@@ -886,7 +896,7 @@ func toJPEG(img image.Image) ([]byte, error) {
 
 // rev1ImagePageHeader returns the image page header sequence used by the
 // Stream Deck v1.
-func rev1ImagePageHeader(pageIndex int, keyIndex uint8, payloadLength int, lastPage bool) []byte {
+func rev1ImagePageHeader(pageIndex int, keyIndex uint8, _ int, lastPage bool) []byte {
 	var lastPageByte byte
 	if lastPage {
 		lastPageByte = 1
@@ -902,7 +912,7 @@ func rev1ImagePageHeader(pageIndex int, keyIndex uint8, payloadLength int, lastP
 
 // miniImagePageHeader returns the image page header sequence used by the
 // Stream Deck Mini.
-func miniImagePageHeader(pageIndex int, keyIndex uint8, payloadLength int, lastPage bool) []byte {
+func miniImagePageHeader(pageIndex int, keyIndex uint8, _ int, lastPage bool) []byte {
 	var lastPageByte byte
 	if lastPage {
 		lastPageByte = 1

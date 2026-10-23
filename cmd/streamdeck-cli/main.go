@@ -1,3 +1,5 @@
+// Command streamdeck-cli controls Elgato Stream Deck devices from the command
+// line.
 package main
 
 import (
@@ -22,11 +24,11 @@ var (
 	d streamdeck.Device
 )
 
-func closeStreamDeck(cmd *coral.Command, args []string) error {
+func closeStreamDeck(_ *coral.Command, _ []string) error {
 	return d.Close()
 }
 
-func initStreamDeck(cmd *coral.Command, args []string) error {
+func initStreamDeck(_ *coral.Command, _ []string) error {
 	devs, err := streamdeck.Devices()
 	if err != nil {
 		return fmt.Errorf("no Stream Deck devices found: %s", err)

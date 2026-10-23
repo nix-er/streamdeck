@@ -8,7 +8,7 @@ var (
 	resetCmd = &coral.Command{
 		Use:   "reset",
 		Short: "resets the device, clears all images and shows the default logo",
-		RunE: func(cmd *coral.Command, args []string) error {
+		RunE: func(_ *coral.Command, _ []string) error {
 			return d.Reset()
 		},
 	}

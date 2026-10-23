@@ -11,7 +11,7 @@ var (
 	brightnessCmd = &coral.Command{
 		Use:   "brightness <percentage>",
 		Short: "controls the brightness of the keys (in percent)",
-		RunE: func(cmd *coral.Command, args []string) error {
+		RunE: func(_ *coral.Command, args []string) error {
 			if len(args) < 1 {
 				return fmt.Errorf("brightness requires a percentage")
 			}
