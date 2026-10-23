@@ -3,6 +3,7 @@ package streamdeck
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
@@ -60,22 +61,37 @@ type Device struct {
 	DPI     uint
 	Padding uint
 
-	featureReportSize   int
-	firmwareOffset      int
-	keyStateOffset      int
-	reportTypeOffset    int // offset of the input report type byte, 0 if the device has none
-	translateKeyIndex   func(index, columns uint8) uint8
-	imagePageSize       int
-	imagePageHeaderSize int
-	flipImage           func(image.Image) image.Image
-	toImageFormat       func(image.Image) ([]byte, error)
-	imagePageHeader     func(pageIndex int, keyIndex uint8, payloadLength int, lastPage bool) []byte
+	// Dials is the number of rotary dials (Stream Deck+).
+	Dials uint8
+
+	// ScreenWidth and ScreenHeight are the pixel dimensions of the touch
+	// screen strip (Stream Deck+), which is split into ScreenSegments
+	// equally sized segments, one above each dial. All zero if the device
+	// has no touch screen.
+	ScreenWidth    uint
+	ScreenHeight   uint
+	ScreenDPI      uint
+	ScreenSegments uint8
+
+	featureReportSize    int
+	firmwareOffset       int
+	keyStateOffset       int
+	reportTypeOffset     int // offset of the input report type byte, 0 if the device has none
+	translateKeyIndex    func(index, columns uint8) uint8
+	imagePageSize        int
+	imagePageHeaderSize  int
+	flipImage            func(image.Image) image.Image
+	toImageFormat        func(image.Image) ([]byte, error)
+	imagePageHeader      func(pageIndex int, keyIndex uint8, payloadLength int, lastPage bool) []byte
+	screenPageSize       int
+	screenPageHeaderSize int
 
 	getFirmwareCommand   []byte
 	resetCommand         []byte
 	setBrightnessCommand []byte
 
-	keyState []byte
+	keyState  []byte
+	dialState []byte
 
 	device hid.Device
 	info   hid.DeviceInfo
@@ -90,11 +106,73 @@ type Device struct {
 	preSleepBrightness uint8
 }
 
+// Event is an input event read from the device: Key, DialPress, DialTurn or
+// Touch.
+type Event interface {
+	isEvent()
+}
+
 // Key holds the current status of a key on the device.
 type Key struct {
 	Index   uint8
 	Pressed bool
 }
+
+// DialPress is emitted when a dial gets pressed or released.
+type DialPress struct {
+	Index   uint8
+	Pressed bool
+}
+
+// DialTurn is emitted when a dial gets turned. Steps is positive for
+// clockwise and negative for counterclockwise turns.
+type DialTurn struct {
+	Index uint8
+	Steps int8
+}
+
+// TouchType describes the kind of a Touch event.
+type TouchType uint8
+
+// Touch event types.
+const (
+	TouchTap TouchType = iota + 1
+	TouchLongPress
+	TouchSwipe
+)
+
+// Touch is emitted when the touch screen gets tapped, long-pressed or
+// swiped. X and Y are the screen coordinates of the touch, EndX and EndY the
+// end point of a swipe.
+type Touch struct {
+	Type       TouchType
+	X, Y       uint16
+	EndX, EndY uint16
+}
+
+func (Key) isEvent()       {}
+func (DialPress) isEvent() {}
+func (DialTurn) isEvent()  {}
+func (Touch) isEvent()     {}
+
+// Input report types and layout of devices with multiple input types
+// (Stream Deck+).
+const (
+	inputTypeKeys  = 0x00
+	inputTypeTouch = 0x02
+	inputTypeDials = 0x03
+
+	inputSubtypeOffset = 4
+	dialStateOffset    = 5
+	dialSubtypePress   = 0x00
+	dialSubtypeTurn    = 0x01
+
+	touchXOffset    = 6
+	touchYOffset    = 8
+	touchEndXOffset = 10
+	touchEndYOffset = 12
+	touchReportSize = 14
+)
 
 // Devices returns all attached Stream Decks.
 func Devices() ([]Device, error) {
@@ -210,6 +288,11 @@ func Devices() ([]Device, error) {
 				Pixels:               120,
 				DPI:                  166,
 				Padding:              16,
+				Dials:                4,
+				ScreenWidth:          800,
+				ScreenHeight:         100,
+				ScreenDPI:            188, // 800px over 108mm
+				ScreenSegments:       4,
 				featureReportSize:    32,
 				firmwareOffset:       6,
 				keyStateOffset:       4,
@@ -220,6 +303,8 @@ func Devices() ([]Device, error) {
 				imagePageHeader:      rev2ImagePageHeader,
 				flipImage:            noFlip,
 				toImageFormat:        toJPEG,
+				screenPageSize:       1024,
+				screenPageHeaderSize: 16,
 				getFirmwareCommand:   c_REV2_FIRMWARE,
 				resetCommand:         c_REV2_RESET,
 				setBrightnessCommand: c_REV2_BRIGHTNESS,
@@ -228,6 +313,7 @@ func Devices() ([]Device, error) {
 
 		if dev.ID != "" {
 			dev.keyState = make([]byte, dev.Columns*dev.Rows)
+			dev.dialState = make([]byte, dev.Dials)
 			dev.info = d
 			dd = append(dd, dev)
 		}
@@ -266,14 +352,23 @@ func (d Device) Reset() error {
 	return d.sendFeatureReport(d.resetCommand)
 }
 
-// Clears the Stream Deck, setting a black image on all buttons.
+// Clear clears the Stream Deck, setting a black image on all buttons and the
+// touch screen.
 func (d Device) Clear() error {
 	img := image.NewRGBA(image.Rect(0, 0, int(d.Pixels), int(d.Pixels)))
 	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
-	for i := uint8(0); i <= d.Columns*d.Rows; i++ {
+	for i := uint8(0); i < d.Columns*d.Rows; i++ {
 		err := d.SetImage(i, img)
 		if err != nil {
 			fmt.Println(err)
+			return err
+		}
+	}
+
+	if d.ScreenWidth > 0 {
+		screen := image.NewRGBA(image.Rect(0, 0, int(d.ScreenWidth), int(d.ScreenHeight)))
+		draw.Draw(screen, screen.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
+		if err := d.SetScreenImage(0, 0, screen); err != nil {
 			return err
 		}
 	}
@@ -282,25 +377,55 @@ func (d Device) Clear() error {
 }
 
 // ReadKeys returns a channel, which it will use to emit key presses/releases.
+// Dial and touch screen input is ignored; use ReadInput to receive it.
 func (d *Device) ReadKeys() (chan Key, error) {
+	ich, err := d.ReadInput()
+	if err != nil {
+		return nil, err
+	}
+
 	kch := make(chan Key)
-	keyBuffer := make([]byte, d.keyStateOffset+len(d.keyState))
+	go func() {
+		for e := range ich {
+			if k, ok := e.(Key); ok {
+				kch <- k
+			}
+		}
+		close(kch)
+	}()
+
+	return kch, nil
+}
+
+// ReadInput returns a channel, which it will use to emit all input events:
+// Key, DialPress, DialTurn and Touch. The channel gets closed when reading
+// from the device fails.
+func (d *Device) ReadInput() (chan Event, error) {
+	ch := make(chan Event)
+
+	size := d.keyStateOffset + len(d.keyState)
+	if d.reportTypeOffset > 0 && size < touchReportSize {
+		size = touchReportSize
+	}
+	buf := make([]byte, size)
+
 	go func() {
 		for {
-			copy(d.keyState, keyBuffer[d.keyStateOffset:])
-
-			if _, err := d.device.Read(keyBuffer); err != nil {
-				close(kch)
+			if _, err := d.device.Read(buf); err != nil {
+				close(ch)
 				return
 			}
 
-			// don't trigger a key event if the device is asleep, but wake it
+			// don't trigger an event if the device is asleep, but wake it
 			if d.asleep {
 				_ = d.Wake()
 
-				// reset state so no spurious key events get triggered
-				for i := d.keyStateOffset; i < len(keyBuffer); i++ {
-					keyBuffer[i] = 0
+				// reset state so no spurious events get triggered
+				for i := range d.keyState {
+					d.keyState[i] = 0
+				}
+				for i := range d.dialState {
+					d.dialState[i] = 0
 				}
 				continue
 			}
@@ -309,26 +434,71 @@ func (d *Device) ReadKeys() (chan Key, error) {
 			d.lastActionTime = time.Now()
 			d.sleepMutex.Unlock()
 
-			// ignore non-key input reports (e.g. dials and touchscreen on the
-			// Stream Deck+), restoring the last known key state
-			if d.reportTypeOffset > 0 && keyBuffer[d.reportTypeOffset] != 0x00 {
-				copy(keyBuffer[d.keyStateOffset:], d.keyState)
-				continue
-			}
-
-			for i := d.keyStateOffset; i < len(keyBuffer); i++ {
-				keyIndex := uint8(i - d.keyStateOffset)
-				if keyBuffer[i] != d.keyState[keyIndex] {
-					kch <- Key{
-						Index:   d.translateKeyIndex(keyIndex, d.Columns),
-						Pressed: keyBuffer[i] == 1,
-					}
-				}
+			for _, e := range d.parseInput(buf) {
+				ch <- e
 			}
 		}
 	}()
 
-	return kch, nil
+	return ch, nil
+}
+
+// parseInput turns an input report into events, updating the known key and
+// dial states.
+func (d *Device) parseInput(buf []byte) []Event {
+	inputType := byte(inputTypeKeys)
+	if d.reportTypeOffset > 0 {
+		inputType = buf[d.reportTypeOffset]
+	}
+
+	var events []Event
+	switch inputType {
+	case inputTypeKeys:
+		for i := range d.keyState {
+			state := buf[d.keyStateOffset+i]
+			if state != d.keyState[i] {
+				d.keyState[i] = state
+				events = append(events, Key{
+					Index:   d.translateKeyIndex(uint8(i), d.Columns),
+					Pressed: state == 1,
+				})
+			}
+		}
+
+	case inputTypeDials:
+		for i := range d.dialState {
+			value := buf[dialStateOffset+i]
+			switch buf[inputSubtypeOffset] {
+			case dialSubtypePress:
+				if value != d.dialState[i] {
+					d.dialState[i] = value
+					events = append(events, DialPress{Index: uint8(i), Pressed: value == 1})
+				}
+			case dialSubtypeTurn:
+				if value != 0 {
+					// the device reports steps as a signed byte
+					events = append(events, DialTurn{Index: uint8(i), Steps: int8(value)}) //nolint:gosec
+				}
+			}
+		}
+
+	case inputTypeTouch:
+		t := Touch{
+			Type: TouchType(buf[inputSubtypeOffset]),
+			X:    binary.LittleEndian.Uint16(buf[touchXOffset:]),
+			Y:    binary.LittleEndian.Uint16(buf[touchYOffset:]),
+		}
+		switch t.Type {
+		case TouchTap, TouchLongPress:
+			events = append(events, t)
+		case TouchSwipe:
+			t.EndX = binary.LittleEndian.Uint16(buf[touchEndXOffset:])
+			t.EndY = binary.LittleEndian.Uint16(buf[touchEndYOffset:])
+			events = append(events, t)
+		}
+	}
+
+	return events
 }
 
 // Sleep puts the device asleep, waiting for a key event to wake it up.
@@ -466,22 +636,83 @@ func (d Device) SetImage(index uint8, img image.Image) error {
 	if err != nil {
 		return fmt.Errorf("cannot convert image data: %v", err)
 	}
-	imageData := imageData{
-		image:    imageBytes,
-		pageSize: d.imagePageSize - d.imagePageHeaderSize,
+
+	keyIndex := d.translateKeyIndex(index, d.Columns)
+	return d.writeImagePages(imageBytes, d.imagePageSize, d.imagePageHeaderSize,
+		func(page, payloadLength int, lastPage bool) []byte {
+			return d.imagePageHeader(page, keyIndex, payloadLength, lastPage)
+		})
+}
+
+// SetScreenImage sets the image of a region of the touch screen, with its
+// top-left corner at x, y. The image must fit within the screen.
+func (d Device) SetScreenImage(x, y int, img image.Image) error {
+	if d.ScreenWidth == 0 {
+		return fmt.Errorf("device has no touch screen")
 	}
 
-	data := make([]byte, d.imagePageSize)
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	if x < 0 || y < 0 || x+w > int(d.ScreenWidth) || y+h > int(d.ScreenHeight) {
+		return fmt.Errorf("supplied image of %dx%d pixels at %d,%d exceeds the %dx%d pixel screen",
+			w, h, x, y, d.ScreenWidth, d.ScreenHeight)
+	}
+
+	imageBytes, err := toJPEG(img)
+	if err != nil {
+		return fmt.Errorf("cannot convert image data: %v", err)
+	}
+
+	return d.writeImagePages(imageBytes, d.screenPageSize, d.screenPageHeaderSize,
+		func(page, payloadLength int, lastPage bool) []byte {
+			return screenImagePageHeader(page, x, y, w, h, payloadLength, lastPage)
+		})
+}
+
+// SetScreenSegmentImage sets the image of a touch screen segment. The image
+// needs to be of the segment's size. The index starts with 0 being the
+// leftmost segment.
+func (d Device) SetScreenSegmentImage(index uint8, img image.Image) error {
+	if index >= d.ScreenSegments {
+		return fmt.Errorf("invalid screen segment %d, device has %d segments", index, d.ScreenSegments)
+	}
+
+	w, h := d.ScreenSegmentWidth(), d.ScreenHeight
+	if img.Bounds().Dx() != int(w) || img.Bounds().Dy() != int(h) {
+		return fmt.Errorf("supplied image has wrong dimensions, expected %dx%d pixels", w, h)
+	}
+
+	return d.SetScreenImage(int(uint(index)*w), 0, img)
+}
+
+// ScreenSegmentWidth returns the width of a touch screen segment in pixels,
+// or 0 if the device has no touch screen.
+func (d Device) ScreenSegmentWidth() uint {
+	if d.ScreenSegments == 0 {
+		return 0
+	}
+	return d.ScreenWidth / uint(d.ScreenSegments)
+}
+
+// writeImagePages sends image data to the device, split into pages of
+// pageSize bytes (including a header of headerSize bytes).
+func (d Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
+	header func(page, payloadLength int, lastPage bool) []byte) error {
+	imageData := imageData{
+		image:    imageBytes,
+		pageSize: pageSize - headerSize,
+	}
+
+	data := make([]byte, pageSize)
 
 	var page int
 	var lastPage bool
 	for !lastPage {
 		var payload []byte
 		payload, lastPage = imageData.Page(page)
-		header := d.imagePageHeader(page, d.translateKeyIndex(index, d.Columns), len(payload), lastPage)
+		h := header(page, len(payload), lastPage)
 
-		copy(data, header)
-		copy(data[len(header):], payload)
+		copy(data, h)
+		copy(data[len(h):], payload)
 
 		_, err := d.device.Write(data)
 		if err != nil {
@@ -686,6 +917,28 @@ func rev2ImagePageHeader(pageIndex int, keyIndex uint8, payloadLength int, lastP
 		0x02, 0x07, keyIndex, lastPageByte,
 		byte(payloadLength), byte(payloadLength >> 8),
 		byte(pageIndex), byte(pageIndex >> 8),
+	}
+}
+
+// screenImagePageHeader returns the image page header sequence used by the
+// Stream Deck+ touch screen. Values are encoded as little-endian 16 bit.
+//
+//nolint:gosec
+func screenImagePageHeader(pageIndex, x, y, width, height, payloadLength int, lastPage bool) []byte {
+	var lastPageByte byte
+	if lastPage {
+		lastPageByte = 1
+	}
+	return []byte{
+		0x02, 0x0c,
+		byte(x), byte(x >> 8),
+		byte(y), byte(y >> 8),
+		byte(width), byte(width >> 8),
+		byte(height), byte(height >> 8),
+		lastPageByte,
+		byte(pageIndex), byte(pageIndex >> 8),
+		byte(payloadLength), byte(payloadLength >> 8),
+		0x00,
 	}
 }
 

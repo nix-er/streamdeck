@@ -82,6 +82,37 @@ Reset the device:
 streamdeck-cli reset
 ```
 
+## Stream Deck+ dials and touch screen
+
+`Device.ReadInput()` emits all input events of a device: `Key`, `DialPress`,
+`DialTurn` (with a signed step count, negative for counterclockwise turns) and
+`Touch` (tap, long press or swipe, with screen coordinates). `ReadKeys()` only
+emits key events.
+
+```go
+events, err := dev.ReadInput()
+if err != nil {
+	return err
+}
+for e := range events {
+	switch e := e.(type) {
+	case streamdeck.Key:
+		fmt.Println("key", e.Index, e.Pressed)
+	case streamdeck.DialPress:
+		fmt.Println("dial", e.Index, e.Pressed)
+	case streamdeck.DialTurn:
+		fmt.Println("dial", e.Index, "turned", e.Steps)
+	case streamdeck.Touch:
+		fmt.Println("touch", e.Type, e.X, e.Y)
+	}
+}
+```
+
+The touch screen (`dev.ScreenWidth` × `dev.ScreenHeight` pixels) is split into
+`dev.ScreenSegments` segments, one above each dial. Set an image on a segment
+with `dev.SetScreenSegmentImage(index, img)`, or on any region with
+`dev.SetScreenImage(x, y, img)`.
+
 ## Feedback
 
 Got some feedback or suggestions? Please open an issue or drop me a note!
