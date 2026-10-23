@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -344,7 +345,8 @@ func (d Device) FirmwareVersion() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(result[d.firmwareOffset:]), nil
+	// the version string is padded with NUL bytes and spaces
+	return strings.TrimRight(string(result[d.firmwareOffset:]), "\x00 "), nil
 }
 
 // Resets the Stream Deck, clears all button images and shows the standby image.
