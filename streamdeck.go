@@ -413,10 +413,13 @@ func (d *Device) ReadInput() (chan Event, error) {
 
 	go func() {
 		for {
-			if _, err := d.device.Read(buf); err != nil {
+			n, err := d.device.Read(buf)
+			if err != nil {
 				close(ch)
 				return
 			}
+			// don't parse leftovers of a previous report
+			clear(buf[n:])
 
 			// don't trigger an event if the device is asleep, but wake it
 			if d.asleep {
@@ -713,10 +716,15 @@ func (d Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
 		payload, lastPage = imageData.Page(page)
 		h := header(page, len(payload), lastPage)
 
+		// pad each page with zeros, like the reference implementations
+		clear(data)
 		copy(data, h)
 		copy(data[len(h):], payload)
 
-		_, err := d.device.Write(data)
+		n, err := d.device.Write(data)
+		if err == nil && n < len(data) {
+			err = fmt.Errorf("short write of %d bytes", n)
+		}
 		if err != nil {
 			return fmt.Errorf("cannot write image page %d of %d (%d image bytes) %d bytes: %v",
 				page, imageData.PageCount(), imageData.Length(), len(data), err)
