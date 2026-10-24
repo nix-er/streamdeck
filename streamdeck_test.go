@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"io"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 // plusDevice returns a Stream Deck+ device without a hardware connection.
@@ -556,7 +558,6 @@ func TestInputEventsWhileAsleep(t *testing.T) {
 // restore on wake-up.
 func TestSleepWhileAsleep(t *testing.T) {
 	d := plusDevice()
-	d.sleepMutex = &sync.RWMutex{}
 	d.asleep = true
 	d.brightness = 0
 	d.preSleepBrightness = 80
@@ -566,5 +567,97 @@ func TestSleepWhileAsleep(t *testing.T) {
 	}
 	if d.preSleepBrightness != 80 {
 		t.Errorf("preSleepBrightness = %d, want 80", d.preSleepBrightness)
+	}
+}
+
+// concurrentHID is a goroutine-safe hid.Device counting what gets written to
+// it. Reads return the reports sent to its input channel.
+type concurrentHID struct {
+	mu      sync.Mutex
+	writes  int
+	reports int
+	input   chan []byte
+}
+
+func (f *concurrentHID) Close() error { return nil }
+
+func (f *concurrentHID) Write(b []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writes++
+	return len(b), nil
+}
+
+func (f *concurrentHID) Read(b []byte) (int, error) {
+	r, ok := <-f.input
+	if !ok {
+		return 0, io.EOF
+	}
+	return copy(b, r), nil
+}
+
+func (f *concurrentHID) ReadTimeout(b []byte, _ int) (int, error) { return f.Read(b) }
+
+func (f *concurrentHID) GetFeatureReport(b []byte) (int, error) { return len(b), nil }
+
+func (f *concurrentHID) SendFeatureReport(b []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reports++
+	return len(b), nil
+}
+
+// The sleep timer, the input reader (waking the device) and the caller
+// (drawing, setting the brightness) use the device concurrently. Run with
+// -race.
+func TestConcurrentSleepWakeAndDrawing(t *testing.T) {
+	d := plusDevice()
+	f := &concurrentHID{input: make(chan []byte)}
+	d.device = f
+	d.SetSleepFadeDuration(20 * time.Millisecond)
+	if err := d.SetBrightness(80); err != nil {
+		t.Fatal(err)
+	}
+
+	ch, err := d.ReadInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+	d.SetSleepTimeout(time.Nanosecond)
+	defer d.SetSleepTimeout(0)
+
+	img := image.NewRGBA(image.Rect(0, 0, int(d.KeyWidth), int(d.KeyHeight)))
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for i := 0; time.Now().Before(deadline); i++ {
+		if err := d.SetImage(uint8(i%int(d.Keys)), img); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+		if i%10 == 0 {
+			if err := d.SetBrightness(uint8(50 + i%50)); err != nil { //nolint:gosec
+				t.Fatal(err)
+			}
+			_ = d.Asleep()
+			// a key press wakes the device, if the timer put it to sleep
+			select {
+			case f.input <- report(inputTypeKeys, byte(i/10%2)):
+			default:
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(f.input)
+
+	if err := d.Wake(); err != nil {
+		t.Fatal(err)
+	}
+	if d.Asleep() {
+		t.Error("device still asleep after Wake")
+	}
+	if d.brightness == 0 {
+		t.Error("device woke up with brightness 0")
 	}
 }

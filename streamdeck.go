@@ -138,7 +138,8 @@ type Device struct {
 	lastActionTime time.Time
 	asleep         bool
 	sleepCancel    context.CancelFunc
-	sleepMutex     *sync.RWMutex
+	sleepMutex     *sync.RWMutex // guards asleep, lastActionTime and the brightness
+	ioMutex        *sync.Mutex   // serializes writes, so images aren't interleaved
 	fadeDuration   time.Duration
 
 	brightness         uint8
@@ -356,6 +357,8 @@ func deviceForProductID(pid uint16) (Device, bool) {
 	dev.Pixels = min(dev.KeyWidth, dev.KeyHeight)
 	dev.keyState = make([]byte, dev.Keys+dev.TouchKeys)
 	dev.dialState = make([]byte, dev.Dials)
+	dev.sleepMutex = &sync.RWMutex{}
+	dev.ioMutex = &sync.Mutex{}
 	return dev, true
 }
 
@@ -388,8 +391,9 @@ func rev2Device(columns, rows uint8, pixels, dpi uint) Device {
 func (d *Device) Open() error {
 	var err error
 	d.device, err = d.info.Open()
+	d.sleepMutex.Lock()
 	d.lastActionTime = time.Now()
-	d.sleepMutex = &sync.RWMutex{}
+	d.sleepMutex.Unlock()
 	return err
 }
 
@@ -407,22 +411,25 @@ func (d *Device) Reopen() error {
 			continue
 		}
 
-		if d.device != nil {
-			_ = d.device.Close()
-		}
 		device, err := nd.info.Open()
 		if err != nil {
 			return err
 		}
 
+		d.ioMutex.Lock()
+		if d.device != nil {
+			_ = d.device.Close()
+		}
 		d.ID = nd.ID
 		d.info = nd.info
 		d.device = device
-		d.asleep = false
+		d.ioMutex.Unlock()
+
 		clear(d.keyState)
 		clear(d.dialState)
 
 		d.sleepMutex.Lock()
+		d.asleep = false
 		d.lastActionTime = time.Now()
 		d.sleepMutex.Unlock()
 		return nil
@@ -438,7 +445,7 @@ func (d *Device) Close() error {
 }
 
 // FirmwareVersion returns the firmware version of the device.
-func (d Device) FirmwareVersion() (string, error) {
+func (d *Device) FirmwareVersion() (string, error) {
 	result, err := d.getFeatureReport(d.getFirmwareCommand)
 	if err != nil {
 		return "", err
@@ -449,7 +456,7 @@ func (d Device) FirmwareVersion() (string, error) {
 
 // Reset resets the Stream Deck, clears all button images and shows the standby
 // image.
-func (d Device) Reset() error {
+func (d *Device) Reset() error {
 	if !d.hasDisplay() {
 		return nil
 	}
@@ -458,22 +465,20 @@ func (d Device) Reset() error {
 
 // hasDisplay returns false for devices without any display (Stream Deck
 // Pedal).
-func (d Device) hasDisplay() bool {
+func (d *Device) hasDisplay() bool {
 	return d.KeyWidth > 0
 }
 
 // Clear clears the Stream Deck, setting a black image on all buttons, the
 // touch screen and the info screen.
-func (d Device) Clear() error {
+func (d *Device) Clear() error {
 	if !d.hasDisplay() {
 		return nil
 	}
 
 	img := blackImage(d.KeyWidth, d.KeyHeight)
 	for i := uint8(0); i < d.Keys; i++ {
-		err := d.SetImage(i, img)
-		if err != nil {
-			fmt.Println(err)
+		if err := d.SetImage(i, img); err != nil {
 			return err
 		}
 	}
@@ -568,7 +573,7 @@ func (d *Device) ReadInput() (chan Event, error) {
 // the key whose hold action put the device to sleep) doesn't.
 func (d *Device) inputEvents(buf []byte) ([]Event, bool) {
 	events := d.parseInput(buf)
-	if !d.asleep {
+	if !d.Asleep() {
 		return events, false
 	}
 
@@ -666,12 +671,12 @@ func (d *Device) Sleep() error {
 	}
 	d.preSleepBrightness = d.brightness
 
-	if err := d.Fade(d.brightness, 0, d.fadeDuration); err != nil {
+	if err := d.fade(d.brightness, 0, d.fadeDuration, d.setBrightness); err != nil {
 		return err
 	}
 
 	d.asleep = true
-	return d.SetBrightness(0)
+	return d.setBrightness(0)
 }
 
 // Wake wakes the device from sleep.
@@ -679,17 +684,23 @@ func (d *Device) Wake() error {
 	d.sleepMutex.Lock()
 	defer d.sleepMutex.Unlock()
 
+	if !d.asleep {
+		return nil
+	}
 	d.asleep = false
-	if err := d.Fade(0, d.preSleepBrightness, d.fadeDuration); err != nil {
+	d.lastActionTime = time.Now()
+	if err := d.fade(0, d.preSleepBrightness, d.fadeDuration, d.setBrightness); err != nil {
 		return err
 	}
 
-	d.lastActionTime = time.Now()
-	return d.SetBrightness(d.preSleepBrightness)
+	return d.setBrightness(d.preSleepBrightness)
 }
 
 // Asleep returns true if the device is asleep.
-func (d Device) Asleep() bool {
+func (d *Device) Asleep() bool {
+	d.sleepMutex.RLock()
+	defer d.sleepMutex.RUnlock()
+
 	return d.asleep
 }
 
@@ -725,9 +736,10 @@ func (d *Device) SetSleepTimeout(t time.Duration) {
 			case <-time.After(time.Second):
 				d.sleepMutex.RLock()
 				since := time.Since(d.lastActionTime)
+				asleep := d.asleep
 				d.sleepMutex.RUnlock()
 
-				if !d.asleep && since >= t {
+				if !asleep && since >= t {
 					_ = d.Sleep()
 				}
 
@@ -740,6 +752,11 @@ func (d *Device) SetSleepTimeout(t time.Duration) {
 
 // Fade fades the brightness in or out.
 func (d *Device) Fade(start uint8, end uint8, duration time.Duration) error {
+	return d.fade(start, end, duration, d.SetBrightness)
+}
+
+// fade fades the brightness from start to end, using set to change it.
+func (d *Device) fade(start, end uint8, duration time.Duration, set func(uint8) error) error {
 	step := (float64(end) - float64(start)) / float64(duration/fadeDelay)
 	if step == math.Inf(1) || step == math.Inf(-1) {
 		return nil
@@ -750,7 +767,7 @@ func (d *Device) Fade(start uint8, end uint8, duration time.Duration) error {
 			(start > end && int8(current) > int8(end))) {
 			break
 		}
-		if err := d.SetBrightness(uint8(current)); err != nil {
+		if err := set(uint8(current)); err != nil {
 			return err
 		}
 
@@ -760,19 +777,24 @@ func (d *Device) Fade(start uint8, end uint8, duration time.Duration) error {
 }
 
 // SetBrightness sets the background lighting brightness from 0 to 100 percent.
+// While the device is asleep, it sets the brightness to restore on wake-up.
 func (d *Device) SetBrightness(percent uint8) error {
-	if percent > 100 {
-		percent = 100
-	}
+	d.sleepMutex.Lock()
+	defer d.sleepMutex.Unlock()
 
-	d.brightness = percent
-	if d.asleep && percent > 0 {
-		// if the device is asleep, remember the brightness, but don't set it
-		d.sleepMutex.Lock()
-		d.preSleepBrightness = percent
-		d.sleepMutex.Unlock()
+	if d.asleep {
+		if percent > 0 {
+			d.preSleepBrightness = min(percent, 100)
+		}
 		return nil
 	}
+	return d.setBrightness(percent)
+}
+
+// setBrightness sets the brightness. The caller must hold sleepMutex.
+func (d *Device) setBrightness(percent uint8) error {
+	percent = min(percent, 100)
+	d.brightness = percent
 	if !d.hasDisplay() {
 		return nil
 	}
@@ -788,7 +810,7 @@ func (d *Device) SetBrightness(percent uint8) error {
 // needs to be in the correct resolution for the device. The index starts with
 // 0 being the top-left button. On a device without key displays it does
 // nothing.
-func (d Device) SetImage(index uint8, img image.Image) error {
+func (d *Device) SetImage(index uint8, img image.Image) error {
 	if !d.hasDisplay() {
 		return nil
 	}
@@ -814,7 +836,7 @@ func (d Device) SetImage(index uint8, img image.Image) error {
 
 // SetScreenImage sets the image of a region of the touch screen, with its
 // top-left corner at x, y. The image must fit within the screen.
-func (d Device) SetScreenImage(x, y int, img image.Image) error {
+func (d *Device) SetScreenImage(x, y int, img image.Image) error {
 	if d.ScreenWidth == 0 {
 		return fmt.Errorf("device has no touch screen")
 	}
@@ -845,7 +867,7 @@ func (d Device) SetScreenImage(x, y int, img image.Image) error {
 
 // SetInfoScreenImage sets the image of the info screen (Stream Deck Neo). The
 // image needs to be of the info screen's size.
-func (d Device) SetInfoScreenImage(img image.Image) error {
+func (d *Device) SetInfoScreenImage(img image.Image) error {
 	if d.InfoScreenWidth == 0 {
 		return fmt.Errorf("device has no info screen")
 	}
@@ -864,7 +886,7 @@ func (d Device) SetInfoScreenImage(img image.Image) error {
 
 // SetKeyColor sets the color of a touch key's LED (Stream Deck Neo). Touch
 // keys have the indexes Keys to Keys+TouchKeys-1.
-func (d Device) SetKeyColor(index uint8, c color.Color) error {
+func (d *Device) SetKeyColor(index uint8, c color.Color) error {
 	if index < d.Keys || index >= d.Keys+d.TouchKeys {
 		return fmt.Errorf("invalid touch key %d, device has %d touch keys starting at %d", index, d.TouchKeys, d.Keys)
 	}
@@ -888,14 +910,14 @@ var dialRingOffsets = []int{0, dialRingLEDs / 2}
 
 // SetDialRingColor sets all LEDs of a dial's ring to a color (Stream Deck
 // Studio).
-func (d Device) SetDialRingColor(index uint8, c color.Color) error {
+func (d *Device) SetDialRingColor(index uint8, c color.Color) error {
 	return d.SetDialRingPercentage(index, c, 100)
 }
 
 // SetDialRingPercentage lights the given percentage of a dial's ring LEDs in
 // a color and turns the others off, e.g. to show a volume level (Stream Deck
 // Studio).
-func (d Device) SetDialRingPercentage(index uint8, c color.Color, percent uint8) error {
+func (d *Device) SetDialRingPercentage(index uint8, c color.Color, percent uint8) error {
 	if !d.DialRings || index >= d.Dials {
 		return fmt.Errorf("invalid dial %d, device has %d dials with LED rings", index, d.dialRingCount())
 	}
@@ -913,7 +935,7 @@ func (d Device) SetDialRingPercentage(index uint8, c color.Color, percent uint8)
 }
 
 // SetDialKnobColor sets the color of a dial's knob LED (Stream Deck Studio).
-func (d Device) SetDialKnobColor(index uint8, c color.Color) error {
+func (d *Device) SetDialKnobColor(index uint8, c color.Color) error {
 	if !d.DialRings || index >= d.Dials {
 		return fmt.Errorf("invalid dial %d, device has %d dials with LEDs", index, d.dialRingCount())
 	}
@@ -924,7 +946,7 @@ func (d Device) SetDialKnobColor(index uint8, c color.Color) error {
 	return d.write(report)
 }
 
-func (d Device) dialRingCount() uint8 {
+func (d *Device) dialRingCount() uint8 {
 	if !d.DialRings {
 		return 0
 	}
@@ -932,7 +954,10 @@ func (d Device) dialRingCount() uint8 {
 }
 
 // write sends an output report to the device.
-func (d Device) write(report []byte) error {
+func (d *Device) write(report []byte) error {
+	d.ioMutex.Lock()
+	defer d.ioMutex.Unlock()
+
 	n, err := d.device.Write(report)
 	if err == nil && n < len(report) {
 		err = fmt.Errorf("short write of %d bytes", n)
@@ -950,7 +975,7 @@ func rgb(c color.Color) (r, g, b byte) {
 // SetScreenSegmentImage sets the image of a touch screen segment. The image
 // needs to be of the segment's size. The index starts with 0 being the
 // leftmost segment.
-func (d Device) SetScreenSegmentImage(index uint8, img image.Image) error {
+func (d *Device) SetScreenSegmentImage(index uint8, img image.Image) error {
 	if index >= d.ScreenSegments {
 		return fmt.Errorf("invalid screen segment %d, device has %d segments", index, d.ScreenSegments)
 	}
@@ -965,7 +990,7 @@ func (d Device) SetScreenSegmentImage(index uint8, img image.Image) error {
 
 // ScreenSegmentWidth returns the width of a touch screen segment in pixels,
 // or 0 if the device has no touch screen.
-func (d Device) ScreenSegmentWidth() uint {
+func (d *Device) ScreenSegmentWidth() uint {
 	if d.ScreenSegments == 0 {
 		return 0
 	}
@@ -974,7 +999,7 @@ func (d Device) ScreenSegmentWidth() uint {
 
 // writeImagePages sends image data to the device, split into pages of
 // pageSize bytes (including a header of headerSize bytes).
-func (d Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
+func (d *Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
 	header func(page, payloadLength int, lastPage bool) []byte) error {
 	imageData := imageData{
 		image:    imageBytes,
@@ -982,6 +1007,10 @@ func (d Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
 	}
 
 	data := make([]byte, pageSize)
+
+	// all pages of an image must be written in a row
+	d.ioMutex.Lock()
+	defer d.ioMutex.Unlock()
 
 	var page int
 	var lastPage bool
@@ -1012,9 +1041,12 @@ func (d Device) writeImagePages(imageBytes []byte, pageSize, headerSize int,
 
 // getFeatureReport from the device without worries about the correct payload
 // size.
-func (d Device) getFeatureReport(payload []byte) ([]byte, error) {
+func (d *Device) getFeatureReport(payload []byte) ([]byte, error) {
 	b := make([]byte, d.featureReportSize)
 	copy(b, payload)
+
+	d.ioMutex.Lock()
+	defer d.ioMutex.Unlock()
 	_, err := d.device.GetFeatureReport(b)
 	if err != nil {
 		return nil, err
@@ -1024,9 +1056,12 @@ func (d Device) getFeatureReport(payload []byte) ([]byte, error) {
 
 // sendFeatureReport to the device without worries about the correct payload
 // size.
-func (d Device) sendFeatureReport(payload []byte) error {
+func (d *Device) sendFeatureReport(payload []byte) error {
 	b := make([]byte, d.featureReportSize)
 	copy(b, payload)
+
+	d.ioMutex.Lock()
+	defer d.ioMutex.Unlock()
 	_, err := d.device.SendFeatureReport(b)
 	return err
 }
