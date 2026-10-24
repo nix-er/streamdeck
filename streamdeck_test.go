@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -507,5 +508,63 @@ func TestDialRings(t *testing.T) {
 	}
 	if err := plusDevice().SetDialRingColor(0, red); err == nil {
 		t.Error("expected error for device without dial rings")
+	}
+}
+
+func TestInputEventsWhileAsleep(t *testing.T) {
+	d := plusDevice()
+
+	// the key whose hold action puts the device to sleep is still down
+	if _, wake := d.inputEvents(report(inputTypeKeys, 1)); wake {
+		t.Fatal("awake device must not wake")
+	}
+	d.asleep = true
+
+	steps := []struct {
+		name string
+		buf  []byte
+		wake bool
+	}{
+		{"release of the held key", report(inputTypeKeys), false},
+		{"dial release", report(inputTypeDials, dialSubtypePress), false},
+		{"key press", report(inputTypeKeys, 0, 0, 1), true},
+		{"dial press", report(inputTypeDials, dialSubtypePress, 1), true},
+		{"dial turn", report(inputTypeDials, dialSubtypeTurn, 1), true},
+		{"touch tap", report(inputTypeTouch, 1, 0, 0xc2, 0x01, 50, 0), true},
+	}
+	for _, s := range steps {
+		events, wake := d.inputEvents(s.buf)
+		if events != nil {
+			t.Errorf("%s: got events %#v while asleep", s.name, events)
+		}
+		if wake != s.wake {
+			t.Errorf("%s: wake = %v, want %v", s.name, wake, s.wake)
+		}
+	}
+
+	// the key that woke the device is still down; its release is reported
+	d.asleep = false
+	d.inputEvents(report(inputTypeKeys, 0, 0, 1))
+	events, _ := d.inputEvents(report(inputTypeKeys))
+	want := []Event{Key{Index: 2, Pressed: false}}
+	if !reflect.DeepEqual(events, want) {
+		t.Errorf("release after wake: got %#v, want %#v", events, want)
+	}
+}
+
+// Putting a sleeping device to sleep again must not lose the brightness to
+// restore on wake-up.
+func TestSleepWhileAsleep(t *testing.T) {
+	d := plusDevice()
+	d.sleepMutex = &sync.RWMutex{}
+	d.asleep = true
+	d.brightness = 0
+	d.preSleepBrightness = 80
+
+	if err := d.Sleep(); err != nil {
+		t.Fatal(err)
+	}
+	if d.preSleepBrightness != 80 {
+		t.Errorf("preSleepBrightness = %d, want 80", d.preSleepBrightness)
 	}
 }

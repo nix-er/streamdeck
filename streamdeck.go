@@ -393,6 +393,44 @@ func (d *Device) Open() error {
 	return err
 }
 
+// Reopen reconnects to the device after the connection was lost, e.g. because
+// it was unplugged, finding it again by its serial number. The Device is
+// updated in place, so references to it stay valid. It returns an error while
+// the device isn't attached.
+func (d *Device) Reopen() error {
+	devs, err := Devices()
+	if err != nil {
+		return err
+	}
+	for _, nd := range devs {
+		if nd.Serial != d.Serial || nd.info.ProductID != d.info.ProductID {
+			continue
+		}
+
+		if d.device != nil {
+			_ = d.device.Close()
+		}
+		device, err := nd.info.Open()
+		if err != nil {
+			return err
+		}
+
+		d.ID = nd.ID
+		d.info = nd.info
+		d.device = device
+		d.asleep = false
+		clear(d.keyState)
+		clear(d.dialState)
+
+		d.sleepMutex.Lock()
+		d.lastActionTime = time.Now()
+		d.sleepMutex.Unlock()
+		return nil
+	}
+
+	return fmt.Errorf("device %s not found", d.Serial)
+}
+
 // Close the connection with the device.
 func (d *Device) Close() error {
 	d.cancelSleepTimer()
@@ -505,17 +543,9 @@ func (d *Device) ReadInput() (chan Event, error) {
 			// don't parse leftovers of a previous report
 			clear(buf[n:])
 
-			// don't trigger an event if the device is asleep, but wake it
-			if d.asleep {
+			events, wake := d.inputEvents(buf)
+			if wake {
 				_ = d.Wake()
-
-				// reset state so no spurious events get triggered
-				for i := range d.keyState {
-					d.keyState[i] = 0
-				}
-				for i := range d.dialState {
-					d.dialState[i] = 0
-				}
 				continue
 			}
 
@@ -523,13 +553,40 @@ func (d *Device) ReadInput() (chan Event, error) {
 			d.lastActionTime = time.Now()
 			d.sleepMutex.Unlock()
 
-			for _, e := range d.parseInput(buf) {
+			for _, e := range events {
 				ch <- e
 			}
 		}
 	}()
 
 	return ch, nil
+}
+
+// inputEvents returns the events of an input report. While the device is
+// asleep it returns no events, but still tracks key and dial states, and
+// reports whether the device should wake up: a press does, a release (e.g. of
+// the key whose hold action put the device to sleep) doesn't.
+func (d *Device) inputEvents(buf []byte) ([]Event, bool) {
+	events := d.parseInput(buf)
+	if !d.asleep {
+		return events, false
+	}
+
+	for _, e := range events {
+		switch e := e.(type) {
+		case Key:
+			if e.Pressed {
+				return nil, true
+			}
+		case DialPress:
+			if e.Pressed {
+				return nil, true
+			}
+		case DialTurn, Touch:
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 // parseInput turns an input report into events, updating the known key and
@@ -603,6 +660,10 @@ func (d *Device) Sleep() error {
 	d.sleepMutex.Lock()
 	defer d.sleepMutex.Unlock()
 
+	if d.asleep {
+		// the brightness is 0 now, don't restore that on wake-up
+		return nil
+	}
 	d.preSleepBrightness = d.brightness
 
 	if err := d.Fade(d.brightness, 0, d.fadeDuration); err != nil {
