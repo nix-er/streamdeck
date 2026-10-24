@@ -27,15 +27,25 @@ const (
 //
 //nolint:revive
 const (
-	VID_ELGATO              = 0x0fd9
-	PID_STREAMDECK          = 0x0060
-	PID_STREAMDECK_V2       = 0x006d
-	PID_STREAMDECK_MK2      = 0x0080
-	PID_STREAMDECK_MINI     = 0x0063
-	PID_STREAMDECK_MINI_MK2 = 0x0090
-	PID_STREAMDECK_XL       = 0x006c
-	PID_STREAMDECK_XL_V2    = 0x008f
-	PID_STREAMDECK_PLUS     = 0x0084
+	VID_ELGATO                        = 0x0fd9
+	PID_STREAMDECK                    = 0x0060
+	PID_STREAMDECK_V2                 = 0x006d
+	PID_STREAMDECK_MK2                = 0x0080
+	PID_STREAMDECK_MK2_SCISSOR        = 0x00a5
+	PID_STREAMDECK_MK2_MODULE         = 0x00b9
+	PID_STREAMDECK_MK2_MODULE_SCISSOR = 0x00e4
+	PID_STREAMDECK_MINI               = 0x0063
+	PID_STREAMDECK_MINI_MK2           = 0x0090
+	PID_STREAMDECK_MINI_DISCORD       = 0x00b3
+	PID_STREAMDECK_MINI_MK2_MODULE    = 0x00b8
+	PID_STREAMDECK_XL                 = 0x006c
+	PID_STREAMDECK_XL_V2              = 0x008f
+	PID_STREAMDECK_XL_V2_MODULE       = 0x00ba
+	PID_STREAMDECK_NEO                = 0x009a
+	PID_STREAMDECK_PEDAL              = 0x0086
+	PID_STREAMDECK_PLUS               = 0x0084
+	PID_STREAMDECK_PLUS_XL            = 0x00c6
+	PID_STREAMDECK_STUDIO             = 0x00aa
 )
 
 // Firmware command IDs.
@@ -45,6 +55,8 @@ var (
 	c_REV1_FIRMWARE   = []byte{0x04}
 	c_REV1_RESET      = []byte{0x0b, 0x63}
 	c_REV1_BRIGHTNESS = []byte{0x05, 0x55, 0xaa, 0xd1, 0x01}
+
+	c_MINI_MODULE_FIRMWARE = []byte{0xa1}
 
 	c_REV2_FIRMWARE   = []byte{0x05}
 	c_REV2_RESET      = []byte{0x03, 0x02}
@@ -59,26 +71,50 @@ type Device struct {
 	Columns uint8
 	Rows    uint8
 	Keys    uint8
+
+	// KeyWidth and KeyHeight are the pixel dimensions of a key's display.
+	// Both are zero if the keys have no displays (Stream Deck Pedal).
+	KeyWidth  uint
+	KeyHeight uint
+	// Pixels is the smaller of KeyWidth and KeyHeight. It equals both on
+	// devices with square keys, which are all but the Stream Deck Studio.
 	Pixels  uint
 	DPI     uint
 	Padding uint
 
-	// Dials is the number of rotary dials (Stream Deck+).
+	// TouchKeys is the number of touch keys without a display (Stream Deck
+	// Neo). They report as keys Keys to Keys+TouchKeys-1 and have an RGB
+	// LED, set with SetKeyColor.
+	TouchKeys uint8
+
+	// Dials is the number of rotary dials (Stream Deck+, + XL and Studio).
 	Dials uint8
 
+	// DialRings is true if the dials have RGB LED rings and knob LEDs, set
+	// with SetDialRingColor, SetDialRingPercentage and SetDialKnobColor
+	// (Stream Deck Studio).
+	DialRings bool
+
 	// ScreenWidth and ScreenHeight are the pixel dimensions of the touch
-	// screen strip (Stream Deck+), which is split into ScreenSegments
-	// equally sized segments, one above each dial. All zero if the device
-	// has no touch screen.
+	// screen strip (Stream Deck+ and + XL), which is split into
+	// ScreenSegments equally sized segments, one above each dial. All zero
+	// if the device has no touch screen.
 	ScreenWidth    uint
 	ScreenHeight   uint
 	ScreenDPI      uint
 	ScreenSegments uint8
 
+	// InfoScreenWidth and InfoScreenHeight are the pixel dimensions of the
+	// info screen (Stream Deck Neo), set with SetInfoScreenImage. Both are
+	// zero if the device has no info screen.
+	InfoScreenWidth  uint
+	InfoScreenHeight uint
+
 	featureReportSize    int
 	firmwareOffset       int
 	keyStateOffset       int
 	reportTypeOffset     int // offset of the input report type byte, 0 if the device has none
+	inputReportSize      int // minimum input report size, 0 to derive it from the key count
 	translateKeyIndex    func(index, columns uint8) uint8
 	imagePageSize        int
 	imagePageHeaderSize  int
@@ -87,6 +123,7 @@ type Device struct {
 	imagePageHeader      func(pageIndex int, keyIndex uint8, payloadLength int, lastPage bool) []byte
 	screenPageSize       int
 	screenPageHeaderSize int
+	screenRotated        bool // the touch screen panel is mounted rotated (Stream Deck + XL)
 
 	getFirmwareCommand   []byte
 	resetCommand         []byte
@@ -185,143 +222,165 @@ func Devices() ([]Device, error) {
 		return nil, err
 	}
 	for _, d := range devs {
-		var dev Device
-
-		switch {
-		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK:
-			dev = Device{
-				ID:                   d.Path,
-				Serial:               d.Serial,
-				Columns:              5,
-				Rows:                 3,
-				Keys:                 15,
-				Pixels:               72,
-				DPI:                  124,
-				Padding:              16,
-				featureReportSize:    17,
-				firmwareOffset:       5,
-				keyStateOffset:       1,
-				translateKeyIndex:    translateRightToLeft,
-				imagePageSize:        7819,
-				imagePageHeaderSize:  16,
-				imagePageHeader:      rev1ImagePageHeader,
-				flipImage:            flipHorizontally,
-				toImageFormat:        toBMP,
-				getFirmwareCommand:   c_REV1_FIRMWARE,
-				resetCommand:         c_REV1_RESET,
-				setBrightnessCommand: c_REV1_BRIGHTNESS,
-			}
-		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_MINI || d.ProductID == PID_STREAMDECK_MINI_MK2):
-			dev = Device{
-				ID:                   d.Path,
-				Serial:               d.Serial,
-				Columns:              3,
-				Rows:                 2,
-				Keys:                 6,
-				Pixels:               80,
-				DPI:                  138,
-				Padding:              16,
-				featureReportSize:    17,
-				firmwareOffset:       5,
-				keyStateOffset:       1,
-				translateKeyIndex:    identity,
-				imagePageSize:        1024,
-				imagePageHeaderSize:  16,
-				imagePageHeader:      miniImagePageHeader,
-				flipImage:            rotateCounterclockwise,
-				toImageFormat:        toBMP,
-				getFirmwareCommand:   c_REV1_FIRMWARE,
-				resetCommand:         c_REV1_RESET,
-				setBrightnessCommand: c_REV1_BRIGHTNESS,
-			}
-		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_V2 || d.ProductID == PID_STREAMDECK_MK2):
-			dev = Device{
-				ID:                   d.Path,
-				Serial:               d.Serial,
-				Columns:              5,
-				Rows:                 3,
-				Keys:                 15,
-				Pixels:               72,
-				DPI:                  124,
-				Padding:              16,
-				featureReportSize:    32,
-				firmwareOffset:       6,
-				keyStateOffset:       4,
-				translateKeyIndex:    identity,
-				imagePageSize:        1024,
-				imagePageHeaderSize:  8,
-				imagePageHeader:      rev2ImagePageHeader,
-				flipImage:            flipHorizontallyAndVertically,
-				toImageFormat:        toJPEG,
-				getFirmwareCommand:   c_REV2_FIRMWARE,
-				resetCommand:         c_REV2_RESET,
-				setBrightnessCommand: c_REV2_BRIGHTNESS,
-			}
-		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_XL || d.ProductID == PID_STREAMDECK_XL_V2):
-			dev = Device{
-				ID:                   d.Path,
-				Serial:               d.Serial,
-				Columns:              8,
-				Rows:                 4,
-				Keys:                 32,
-				Pixels:               96,
-				DPI:                  166,
-				Padding:              16,
-				featureReportSize:    32,
-				firmwareOffset:       6,
-				keyStateOffset:       4,
-				translateKeyIndex:    identity,
-				imagePageSize:        1024,
-				imagePageHeaderSize:  8,
-				imagePageHeader:      rev2ImagePageHeader,
-				flipImage:            flipHorizontallyAndVertically,
-				toImageFormat:        toJPEG,
-				getFirmwareCommand:   c_REV2_FIRMWARE,
-				resetCommand:         c_REV2_RESET,
-				setBrightnessCommand: c_REV2_BRIGHTNESS,
-			}
-		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK_PLUS:
-			dev = Device{
-				ID:                   d.Path,
-				Serial:               d.Serial,
-				Columns:              4,
-				Rows:                 2,
-				Keys:                 8,
-				Pixels:               120,
-				DPI:                  166,
-				Padding:              16,
-				Dials:                4,
-				ScreenWidth:          800,
-				ScreenHeight:         100,
-				ScreenDPI:            188, // 800px over 108mm
-				ScreenSegments:       4,
-				featureReportSize:    32,
-				firmwareOffset:       6,
-				keyStateOffset:       4,
-				reportTypeOffset:     1,
-				translateKeyIndex:    identity,
-				imagePageSize:        1024,
-				imagePageHeaderSize:  8,
-				imagePageHeader:      rev2ImagePageHeader,
-				flipImage:            noFlip,
-				toImageFormat:        toJPEG,
-				screenPageSize:       1024,
-				screenPageHeaderSize: 16,
-				getFirmwareCommand:   c_REV2_FIRMWARE,
-				resetCommand:         c_REV2_RESET,
-				setBrightnessCommand: c_REV2_BRIGHTNESS,
-			}
+		if d.VendorID != VID_ELGATO {
+			continue
+		}
+		dev, ok := deviceForProductID(d.ProductID)
+		if !ok {
+			continue
 		}
 
-		if dev.ID != "" {
-			dev.keyState = make([]byte, dev.Columns*dev.Rows)
-			dev.dialState = make([]byte, dev.Dials)
-			dev.info = d
-			dd = append(dd, dev)
-		}
+		dev.ID = d.Path
+		dev.Serial = d.Serial
+		dev.info = d
+		dd = append(dd, dev)
 	}
 
 	return dd, nil
+}
+
+// deviceForProductID returns the device description for a Stream Deck
+// product ID, without a hardware connection, or false for unknown products.
+func deviceForProductID(pid uint16) (Device, bool) {
+	var dev Device
+
+	switch pid {
+	case PID_STREAMDECK:
+		dev = Device{
+			Columns:              5,
+			Rows:                 3,
+			KeyWidth:             72,
+			KeyHeight:            72,
+			DPI:                  124,
+			Padding:              16,
+			featureReportSize:    17,
+			firmwareOffset:       5,
+			keyStateOffset:       1,
+			translateKeyIndex:    translateRightToLeft,
+			imagePageSize:        7819,
+			imagePageHeaderSize:  16,
+			imagePageHeader:      rev1ImagePageHeader,
+			flipImage:            flipHorizontally,
+			toImageFormat:        toBMP,
+			getFirmwareCommand:   c_REV1_FIRMWARE,
+			resetCommand:         c_REV1_RESET,
+			setBrightnessCommand: c_REV1_BRIGHTNESS,
+		}
+	case PID_STREAMDECK_MINI, PID_STREAMDECK_MINI_MK2, PID_STREAMDECK_MINI_DISCORD, PID_STREAMDECK_MINI_MK2_MODULE:
+		dev = Device{
+			Columns:              3,
+			Rows:                 2,
+			KeyWidth:             80,
+			KeyHeight:            80,
+			DPI:                  138,
+			Padding:              16,
+			featureReportSize:    17,
+			firmwareOffset:       5,
+			keyStateOffset:       1,
+			translateKeyIndex:    identity,
+			imagePageSize:        1024,
+			imagePageHeaderSize:  16,
+			imagePageHeader:      miniImagePageHeader,
+			flipImage:            rotateCounterclockwise,
+			toImageFormat:        toBMP,
+			getFirmwareCommand:   c_REV1_FIRMWARE,
+			resetCommand:         c_REV1_RESET,
+			setBrightnessCommand: c_REV1_BRIGHTNESS,
+		}
+		if pid == PID_STREAMDECK_MINI_MK2_MODULE {
+			dev.getFirmwareCommand = c_MINI_MODULE_FIRMWARE
+		}
+	case PID_STREAMDECK_V2, PID_STREAMDECK_MK2, PID_STREAMDECK_MK2_SCISSOR,
+		PID_STREAMDECK_MK2_MODULE, PID_STREAMDECK_MK2_MODULE_SCISSOR:
+		dev = rev2Device(5, 3, 72, 124)
+		dev.flipImage = flipHorizontallyAndVertically
+	case PID_STREAMDECK_XL, PID_STREAMDECK_XL_V2, PID_STREAMDECK_XL_V2_MODULE:
+		dev = rev2Device(8, 4, 96, 166)
+		dev.flipImage = flipHorizontallyAndVertically
+	case PID_STREAMDECK_NEO:
+		dev = rev2Device(4, 2, 96, 166)
+		dev.flipImage = flipHorizontallyAndVertically
+		dev.TouchKeys = 2
+		dev.InfoScreenWidth = 248
+		dev.InfoScreenHeight = 58
+	case PID_STREAMDECK_PEDAL:
+		dev = Device{
+			Columns:            3,
+			Rows:               1,
+			featureReportSize:  32,
+			firmwareOffset:     6,
+			keyStateOffset:     4,
+			translateKeyIndex:  identity,
+			getFirmwareCommand: c_REV2_FIRMWARE,
+		}
+	case PID_STREAMDECK_PLUS:
+		dev = rev2Device(4, 2, 120, 166)
+		dev.flipImage = noFlip
+		dev.Dials = 4
+		dev.ScreenWidth = 800
+		dev.ScreenHeight = 100
+		dev.ScreenDPI = 188 // 800px over 108mm
+		dev.ScreenSegments = 4
+		dev.reportTypeOffset = 1
+		dev.screenPageSize = 1024
+		dev.screenPageHeaderSize = 16
+	case PID_STREAMDECK_PLUS_XL:
+		// the keys and the touch screen are mounted rotated
+		dev = rev2Device(9, 4, 112, 166)
+		dev.flipImage = rotateCounterclockwise
+		dev.Dials = 6
+		dev.ScreenWidth = 1200
+		dev.ScreenHeight = 100
+		dev.ScreenDPI = 188 // assumed to match the Stream Deck+
+		dev.ScreenSegments = 6
+		dev.reportTypeOffset = 1
+		dev.inputReportSize = 64
+		dev.screenPageSize = 1024
+		dev.screenPageHeaderSize = 16
+		dev.screenRotated = true
+	case PID_STREAMDECK_STUDIO:
+		dev = rev2Device(16, 2, 0, 166)
+		dev.KeyWidth = 144
+		dev.KeyHeight = 112
+		dev.flipImage = noFlip
+		dev.firmwareOffset = 5
+		dev.Dials = 2
+		dev.DialRings = true
+		dev.reportTypeOffset = 1
+		dev.inputReportSize = 43
+	default:
+		return Device{}, false
+	}
+
+	dev.Keys = dev.Columns * dev.Rows
+	dev.Pixels = min(dev.KeyWidth, dev.KeyHeight)
+	dev.keyState = make([]byte, dev.Keys+dev.TouchKeys)
+	dev.dialState = make([]byte, dev.Dials)
+	return dev, true
+}
+
+// rev2Device returns a device with square keys of the given size, using the
+// second revision of the protocol (JPEG images, rev2 commands).
+func rev2Device(columns, rows uint8, pixels, dpi uint) Device {
+	return Device{
+		Columns:              columns,
+		Rows:                 rows,
+		KeyWidth:             pixels,
+		KeyHeight:            pixels,
+		DPI:                  dpi,
+		Padding:              16,
+		featureReportSize:    32,
+		firmwareOffset:       6,
+		keyStateOffset:       4,
+		translateKeyIndex:    identity,
+		imagePageSize:        1024,
+		imagePageHeaderSize:  8,
+		imagePageHeader:      rev2ImagePageHeader,
+		toImageFormat:        toJPEG,
+		getFirmwareCommand:   c_REV2_FIRMWARE,
+		resetCommand:         c_REV2_RESET,
+		setBrightnessCommand: c_REV2_BRIGHTNESS,
+	}
 }
 
 // Open the device for input/output. This must be called before trying to
@@ -353,15 +412,27 @@ func (d Device) FirmwareVersion() (string, error) {
 // Reset resets the Stream Deck, clears all button images and shows the standby
 // image.
 func (d Device) Reset() error {
+	if !d.hasDisplay() {
+		return nil
+	}
 	return d.sendFeatureReport(d.resetCommand)
 }
 
-// Clear clears the Stream Deck, setting a black image on all buttons and the
-// touch screen.
+// hasDisplay returns false for devices without any display (Stream Deck
+// Pedal).
+func (d Device) hasDisplay() bool {
+	return d.KeyWidth > 0
+}
+
+// Clear clears the Stream Deck, setting a black image on all buttons, the
+// touch screen and the info screen.
 func (d Device) Clear() error {
-	img := image.NewRGBA(image.Rect(0, 0, int(d.Pixels), int(d.Pixels)))
-	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
-	for i := uint8(0); i < d.Columns*d.Rows; i++ {
+	if !d.hasDisplay() {
+		return nil
+	}
+
+	img := blackImage(d.KeyWidth, d.KeyHeight)
+	for i := uint8(0); i < d.Keys; i++ {
 		err := d.SetImage(i, img)
 		if err != nil {
 			fmt.Println(err)
@@ -370,14 +441,25 @@ func (d Device) Clear() error {
 	}
 
 	if d.ScreenWidth > 0 {
-		screen := image.NewRGBA(image.Rect(0, 0, int(d.ScreenWidth), int(d.ScreenHeight)))
-		draw.Draw(screen, screen.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
-		if err := d.SetScreenImage(0, 0, screen); err != nil {
+		if err := d.SetScreenImage(0, 0, blackImage(d.ScreenWidth, d.ScreenHeight)); err != nil {
+			return err
+		}
+	}
+
+	if d.InfoScreenWidth > 0 {
+		if err := d.SetInfoScreenImage(blackImage(d.InfoScreenWidth, d.InfoScreenHeight)); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// blackImage returns a black image of the given size.
+func blackImage(width, height uint) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
+	return img
 }
 
 // ReadKeys returns a channel, which it will use to emit key presses/releases.
@@ -407,7 +489,7 @@ func (d *Device) ReadKeys() (chan Key, error) {
 func (d *Device) ReadInput() (chan Event, error) {
 	ch := make(chan Event)
 
-	size := d.keyStateOffset + len(d.keyState)
+	size := max(d.keyStateOffset+len(d.keyState), d.inputReportSize)
 	if d.reportTypeOffset > 0 && size < touchReportSize {
 		size = touchReportSize
 	}
@@ -630,6 +712,9 @@ func (d *Device) SetBrightness(percent uint8) error {
 		d.sleepMutex.Unlock()
 		return nil
 	}
+	if !d.hasDisplay() {
+		return nil
+	}
 
 	report := make([]byte, len(d.setBrightnessCommand)+1)
 	copy(report, d.setBrightnessCommand)
@@ -640,11 +725,18 @@ func (d *Device) SetBrightness(percent uint8) error {
 
 // SetImage sets the image of a button on the Stream Deck. The provided image
 // needs to be in the correct resolution for the device. The index starts with
-// 0 being the top-left button.
+// 0 being the top-left button. On a device without key displays it does
+// nothing.
 func (d Device) SetImage(index uint8, img image.Image) error {
-	if img.Bounds().Dy() != int(d.Pixels) ||
-		img.Bounds().Dx() != int(d.Pixels) {
-		return fmt.Errorf("supplied image has wrong dimensions, expected %[1]dx%[1]d pixels", d.Pixels)
+	if !d.hasDisplay() {
+		return nil
+	}
+	if index >= d.Keys {
+		return fmt.Errorf("invalid key %d, device has %d keys with a display", index, d.Keys)
+	}
+	if img.Bounds().Dx() != int(d.KeyWidth) ||
+		img.Bounds().Dy() != int(d.KeyHeight) {
+		return fmt.Errorf("supplied image has wrong dimensions, expected %dx%d pixels", d.KeyWidth, d.KeyHeight)
 	}
 
 	imageBytes, err := d.toImageFormat(d.flipImage(img))
@@ -672,6 +764,13 @@ func (d Device) SetScreenImage(x, y int, img image.Image) error {
 			w, h, x, y, d.ScreenWidth, d.ScreenHeight)
 	}
 
+	if d.screenRotated {
+		// the panel is mounted rotated: rotate the image and swap the axes
+		// of its region
+		img = rotateCounterclockwise(img)
+		x, y, w, h = y, x, h, w
+	}
+
 	imageBytes, err := toJPEG(img)
 	if err != nil {
 		return fmt.Errorf("cannot convert image data: %v", err)
@@ -681,6 +780,110 @@ func (d Device) SetScreenImage(x, y int, img image.Image) error {
 		func(page, payloadLength int, lastPage bool) []byte {
 			return screenImagePageHeader(page, x, y, w, h, payloadLength, lastPage)
 		})
+}
+
+// SetInfoScreenImage sets the image of the info screen (Stream Deck Neo). The
+// image needs to be of the info screen's size.
+func (d Device) SetInfoScreenImage(img image.Image) error {
+	if d.InfoScreenWidth == 0 {
+		return fmt.Errorf("device has no info screen")
+	}
+	if img.Bounds().Dx() != int(d.InfoScreenWidth) || img.Bounds().Dy() != int(d.InfoScreenHeight) {
+		return fmt.Errorf("supplied image has wrong dimensions, expected %dx%d pixels",
+			d.InfoScreenWidth, d.InfoScreenHeight)
+	}
+
+	imageBytes, err := toJPEG(flipHorizontallyAndVertically(img))
+	if err != nil {
+		return fmt.Errorf("cannot convert image data: %v", err)
+	}
+
+	return d.writeImagePages(imageBytes, d.imagePageSize, d.imagePageHeaderSize, infoScreenImagePageHeader)
+}
+
+// SetKeyColor sets the color of a touch key's LED (Stream Deck Neo). Touch
+// keys have the indexes Keys to Keys+TouchKeys-1.
+func (d Device) SetKeyColor(index uint8, c color.Color) error {
+	if index < d.Keys || index >= d.Keys+d.TouchKeys {
+		return fmt.Errorf("invalid touch key %d, device has %d touch keys starting at %d", index, d.TouchKeys, d.Keys)
+	}
+
+	r, g, b := rgb(c)
+	return d.sendFeatureReport([]byte{0x03, 0x06, index, r, g, b})
+}
+
+// Dial LED commands and the number of LEDs in a dial ring (Stream Deck
+// Studio).
+const (
+	dialRingCommand = 0x0f
+	dialKnobCommand = 0x10
+	dialRingLEDs    = 24
+	dialReportSize  = 1024
+)
+
+// dialRingOffsets is the LED offset of each dial ring, so that LED 0 of
+// every ring is at the same position.
+var dialRingOffsets = []int{0, dialRingLEDs / 2}
+
+// SetDialRingColor sets all LEDs of a dial's ring to a color (Stream Deck
+// Studio).
+func (d Device) SetDialRingColor(index uint8, c color.Color) error {
+	return d.SetDialRingPercentage(index, c, 100)
+}
+
+// SetDialRingPercentage lights the given percentage of a dial's ring LEDs in
+// a color and turns the others off, e.g. to show a volume level (Stream Deck
+// Studio).
+func (d Device) SetDialRingPercentage(index uint8, c color.Color, percent uint8) error {
+	if !d.DialRings || index >= d.Dials {
+		return fmt.Errorf("invalid dial %d, device has %d dials with LED rings", index, d.dialRingCount())
+	}
+
+	lit := (min(int(percent), 100)*dialRingLEDs + 50) / 100
+	r, g, b := rgb(c)
+
+	report := make([]byte, dialReportSize)
+	report[0], report[1], report[2] = 0x02, dialRingCommand, index
+	for i := range lit {
+		led := (i + dialRingOffsets[index%2]) % dialRingLEDs
+		copy(report[3+led*3:], []byte{r, g, b})
+	}
+	return d.write(report)
+}
+
+// SetDialKnobColor sets the color of a dial's knob LED (Stream Deck Studio).
+func (d Device) SetDialKnobColor(index uint8, c color.Color) error {
+	if !d.DialRings || index >= d.Dials {
+		return fmt.Errorf("invalid dial %d, device has %d dials with LEDs", index, d.dialRingCount())
+	}
+
+	r, g, b := rgb(c)
+	report := make([]byte, dialReportSize)
+	copy(report, []byte{0x02, dialKnobCommand, index, r, g, b})
+	return d.write(report)
+}
+
+func (d Device) dialRingCount() uint8 {
+	if !d.DialRings {
+		return 0
+	}
+	return d.Dials
+}
+
+// write sends an output report to the device.
+func (d Device) write(report []byte) error {
+	n, err := d.device.Write(report)
+	if err == nil && n < len(report) {
+		err = fmt.Errorf("short write of %d bytes", n)
+	}
+	return err
+}
+
+// rgb returns the 8 bit color channels of a color.
+func rgb(c color.Color) (r, g, b byte) {
+	c = color.NRGBAModel.Convert(c)
+	n := c.(color.NRGBA)
+	return n.R, n.G, n.B
 }
 
 // SetScreenSegmentImage sets the image of a touch screen segment. The image
@@ -827,26 +1030,19 @@ func flipHorizontallyAndVertically(img image.Image) image.Image {
 	return flipped
 }
 
-// rotateCounterclockwise returns the given image rotated counterclockwise.
+// rotateCounterclockwise returns the given image rotated 90 degrees
+// counterclockwise.
 func rotateCounterclockwise(img image.Image) image.Image {
-	flipped := image.NewRGBA(img.Bounds())
-	draw.Copy(flipped, image.Point{}, img, img.Bounds(), draw.Src, nil)
-	for y := 0; y < flipped.Bounds().Dy(); y++ {
-		for x := y + 1; x < flipped.Bounds().Dx(); x++ {
-			c := flipped.RGBAAt(x, y)
-			flipped.SetRGBA(x, y, flipped.RGBAAt(y, x))
-			flipped.SetRGBA(y, x, c)
+	src := toRGBA(img)
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	rotated := image.NewRGBA(image.Rect(0, 0, h, w))
+	for y := range w {
+		for x := range h {
+			rotated.SetRGBA(x, y, src.RGBAAt(b.Min.X+w-1-y, b.Min.Y+x))
 		}
 	}
-	for y := 0; y < flipped.Bounds().Dy()/2; y++ {
-		yy := flipped.Bounds().Max.Y - y - 1
-		for x := 0; x < flipped.Bounds().Dx(); x++ {
-			c := flipped.RGBAAt(x, y)
-			flipped.SetRGBA(x, y, flipped.RGBAAt(x, yy))
-			flipped.SetRGBA(x, yy, c)
-		}
-	}
-	return flipped
+	return rotated
 }
 
 // toBMP returns the raw bytes of the given image in BMP format.
@@ -935,6 +1131,22 @@ func rev2ImagePageHeader(pageIndex int, keyIndex uint8, payloadLength int, lastP
 	}
 	return []byte{
 		0x02, 0x07, keyIndex, lastPageByte,
+		byte(payloadLength), byte(payloadLength >> 8),
+		byte(pageIndex), byte(pageIndex >> 8),
+	}
+}
+
+// infoScreenImagePageHeader returns the image page header sequence used by
+// the Stream Deck Neo info screen. Values are encoded as little-endian 16 bit.
+//
+//nolint:gosec
+func infoScreenImagePageHeader(pageIndex, payloadLength int, lastPage bool) []byte {
+	var lastPageByte byte
+	if lastPage {
+		lastPageByte = 1
+	}
+	return []byte{
+		0x02, 0x0b, 0x00, lastPageByte,
 		byte(payloadLength), byte(payloadLength >> 8),
 		byte(pageIndex), byte(pageIndex >> 8),
 	}

@@ -3,29 +3,23 @@ package streamdeck
 import (
 	"bytes"
 	"image"
+	"image/color"
 	"reflect"
 	"testing"
 )
 
 // plusDevice returns a Stream Deck+ device without a hardware connection.
 func plusDevice() *Device {
-	return &Device{
-		Columns:              4,
-		Rows:                 2,
-		Keys:                 8,
-		Pixels:               120,
-		Dials:                4,
-		ScreenWidth:          800,
-		ScreenHeight:         100,
-		ScreenSegments:       4,
-		keyStateOffset:       4,
-		reportTypeOffset:     1,
-		translateKeyIndex:    identity,
-		screenPageSize:       1024,
-		screenPageHeaderSize: 16,
-		keyState:             make([]byte, 8),
-		dialState:            make([]byte, 4),
+	return newDevice(PID_STREAMDECK_PLUS)
+}
+
+// newDevice returns a device without a hardware connection.
+func newDevice(pid uint16) *Device {
+	d, ok := deviceForProductID(pid)
+	if !ok {
+		panic("unknown product ID")
 	}
+	return &d
 }
 
 // report builds a 14 byte Stream Deck+ input report of the given type, with
@@ -119,14 +113,18 @@ func TestScreenImagePageHeader(t *testing.T) {
 
 // fakeHID records the reports written to it.
 type fakeHID struct {
-	writes [][]byte
+	writes   [][]byte
+	features [][]byte
 }
 
 func (f *fakeHID) Close() error                             { return nil }
 func (f *fakeHID) Read(b []byte) (int, error)               { return 0, nil }
 func (f *fakeHID) ReadTimeout(b []byte, _ int) (int, error) { return 0, nil }
 func (f *fakeHID) GetFeatureReport(b []byte) (int, error)   { return len(b), nil }
-func (f *fakeHID) SendFeatureReport(b []byte) (int, error)  { return len(b), nil }
+func (f *fakeHID) SendFeatureReport(b []byte) (int, error) {
+	f.features = append(f.features, append([]byte(nil), b...))
+	return len(b), nil
+}
 func (f *fakeHID) Write(b []byte) (int, error) {
 	f.writes = append(f.writes, append([]byte(nil), b...))
 	return len(b), nil
@@ -189,5 +187,325 @@ func TestSetScreenImageErrors(t *testing.T) {
 	noScreen := &Device{}
 	if err := noScreen.SetScreenImage(0, 0, image.NewRGBA(image.Rect(0, 0, 10, 10))); err == nil {
 		t.Error("expected error for device without screen")
+	}
+}
+
+func TestDeviceForProductID(t *testing.T) {
+	tests := []struct {
+		pid                 uint16
+		columns, rows, keys uint8
+		width, height       uint
+		touchKeys, dials    uint8
+		screen              [2]uint
+		info                [2]uint
+		dialRings           bool
+	}{
+		{pid: PID_STREAMDECK, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_V2, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_MK2, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_MK2_SCISSOR, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_MK2_MODULE, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_MK2_MODULE_SCISSOR, columns: 5, rows: 3, keys: 15, width: 72, height: 72},
+		{pid: PID_STREAMDECK_MINI, columns: 3, rows: 2, keys: 6, width: 80, height: 80},
+		{pid: PID_STREAMDECK_MINI_MK2, columns: 3, rows: 2, keys: 6, width: 80, height: 80},
+		{pid: PID_STREAMDECK_MINI_DISCORD, columns: 3, rows: 2, keys: 6, width: 80, height: 80},
+		{pid: PID_STREAMDECK_MINI_MK2_MODULE, columns: 3, rows: 2, keys: 6, width: 80, height: 80},
+		{pid: PID_STREAMDECK_XL, columns: 8, rows: 4, keys: 32, width: 96, height: 96},
+		{pid: PID_STREAMDECK_XL_V2, columns: 8, rows: 4, keys: 32, width: 96, height: 96},
+		{pid: PID_STREAMDECK_XL_V2_MODULE, columns: 8, rows: 4, keys: 32, width: 96, height: 96},
+		{
+			pid: PID_STREAMDECK_NEO, columns: 4, rows: 2, keys: 8, width: 96, height: 96,
+			touchKeys: 2, info: [2]uint{248, 58},
+		},
+		{pid: PID_STREAMDECK_PEDAL, columns: 3, rows: 1, keys: 3},
+		{
+			pid: PID_STREAMDECK_PLUS, columns: 4, rows: 2, keys: 8, width: 120, height: 120,
+			dials: 4, screen: [2]uint{800, 100},
+		},
+		{
+			pid: PID_STREAMDECK_PLUS_XL, columns: 9, rows: 4, keys: 36, width: 112, height: 112,
+			dials: 6, screen: [2]uint{1200, 100},
+		},
+		{
+			pid: PID_STREAMDECK_STUDIO, columns: 16, rows: 2, keys: 32, width: 144, height: 112,
+			dials: 2, dialRings: true,
+		},
+	}
+
+	for _, tt := range tests {
+		d, ok := deviceForProductID(tt.pid)
+		if !ok {
+			t.Errorf("%#04x: unknown product ID", tt.pid)
+			continue
+		}
+		if d.Columns != tt.columns || d.Rows != tt.rows || d.Keys != tt.keys {
+			t.Errorf("%#04x: got %dx%d with %d keys, want %dx%d with %d keys",
+				tt.pid, d.Columns, d.Rows, d.Keys, tt.columns, tt.rows, tt.keys)
+		}
+		if d.KeyWidth != tt.width || d.KeyHeight != tt.height || d.Pixels != min(tt.width, tt.height) {
+			t.Errorf("%#04x: got %dx%d key pixels (%d), want %dx%d",
+				tt.pid, d.KeyWidth, d.KeyHeight, d.Pixels, tt.width, tt.height)
+		}
+		if d.TouchKeys != tt.touchKeys || d.Dials != tt.dials || d.DialRings != tt.dialRings {
+			t.Errorf("%#04x: got %d touch keys, %d dials, rings %v", tt.pid, d.TouchKeys, d.Dials, d.DialRings)
+		}
+		if d.ScreenWidth != tt.screen[0] || d.ScreenHeight != tt.screen[1] {
+			t.Errorf("%#04x: got %dx%d touch screen", tt.pid, d.ScreenWidth, d.ScreenHeight)
+		}
+		if tt.dials > 0 && tt.screen[0] > 0 && d.ScreenSegments != tt.dials {
+			t.Errorf("%#04x: got %d screen segments, want %d", tt.pid, d.ScreenSegments, tt.dials)
+		}
+		if d.InfoScreenWidth != tt.info[0] || d.InfoScreenHeight != tt.info[1] {
+			t.Errorf("%#04x: got %dx%d info screen", tt.pid, d.InfoScreenWidth, d.InfoScreenHeight)
+		}
+		if len(d.keyState) != int(tt.keys+tt.touchKeys) || len(d.dialState) != int(tt.dials) {
+			t.Errorf("%#04x: got %d key and %d dial states", tt.pid, len(d.keyState), len(d.dialState))
+		}
+	}
+
+	if _, ok := deviceForProductID(0xffff); ok {
+		t.Error("unknown product ID accepted")
+	}
+	if d := newDevice(PID_STREAMDECK_MINI_MK2_MODULE); d.getFirmwareCommand[0] != 0xa1 {
+		t.Errorf("Mini MK.2 Module uses firmware command % x", d.getFirmwareCommand)
+	}
+}
+
+// keysReport builds an input report without a report type, with key states
+// starting at byte 4.
+func keysReport(size int, pressed ...int) []byte {
+	buf := make([]byte, size)
+	buf[0] = 0x01
+	for _, i := range pressed {
+		buf[4+i] = 1
+	}
+	return buf
+}
+
+func TestParseInputNeoTouchKeys(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_NEO)
+
+	got := d.parseInput(keysReport(14, 9))
+	want := []Event{Key{Index: 9, Pressed: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseInputPedal(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_PEDAL)
+
+	got := d.parseInput(keysReport(7, 1))
+	want := []Event{Key{Index: 1, Pressed: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseInputStudio(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_STUDIO)
+
+	buf := make([]byte, 43)
+	buf[0], buf[1] = 0x01, inputTypeKeys
+	buf[4+31] = 1
+	got := d.parseInput(buf)
+	want := []Event{Key{Index: 31, Pressed: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("keys: got %v, want %v", got, want)
+	}
+
+	buf = make([]byte, 43)
+	buf[0], buf[1], buf[4], buf[6] = 0x01, inputTypeDials, dialSubtypeTurn, 0xfe
+	got = d.parseInput(buf)
+	want = []Event{DialTurn{Index: 1, Steps: -2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dials: got %v, want %v", got, want)
+	}
+}
+
+func TestParseInputPlusXL(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_PLUS_XL)
+
+	buf := make([]byte, 64)
+	buf[0], buf[1] = 0x01, inputTypeKeys
+	buf[4+35] = 1
+	got := d.parseInput(buf)
+	want := []Event{Key{Index: 35, Pressed: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("keys: got %v, want %v", got, want)
+	}
+
+	buf = make([]byte, 64)
+	buf[0], buf[1], buf[4], buf[5+5] = 0x01, inputTypeDials, dialSubtypePress, 1
+	got = d.parseInput(buf)
+	want = []Event{DialPress{Index: 5, Pressed: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dials: got %v, want %v", got, want)
+	}
+}
+
+func TestRotateCounterclockwise(t *testing.T) {
+	// a 3x2 image, where every pixel's red channel encodes its position
+	src := image.NewRGBA(image.Rect(0, 0, 3, 2))
+	for y := range 2 {
+		for x := range 3 {
+			src.SetRGBA(x, y, color.RGBA{R: uint8(y*3 + x), A: 255})
+		}
+	}
+
+	got := rotateCounterclockwise(src)
+	if b := got.Bounds(); b.Dx() != 2 || b.Dy() != 3 {
+		t.Fatalf("got %dx%d image, want 2x3", b.Dx(), b.Dy())
+	}
+
+	// rotated counterclockwise, the top-right pixel is now the top-left one:
+	//  0 1 2      2 5
+	//  3 4 5  ->  1 4
+	//             0 3
+	want := [][]uint8{{2, 5}, {1, 4}, {0, 3}}
+	for y, row := range want {
+		for x, v := range row {
+			if r := got.(*image.RGBA).RGBAAt(x, y).R; r != v {
+				t.Errorf("pixel %d,%d is %d, want %d", x, y, r, v)
+			}
+		}
+	}
+}
+
+func TestSetScreenImagePlusXL(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_PLUS_XL)
+	f := &fakeHID{}
+	d.device = f
+
+	if err := d.SetScreenSegmentImage(2, image.NewRGBA(image.Rect(0, 0, 200, 100))); err != nil {
+		t.Fatal(err)
+	}
+
+	// the region is sent with swapped axes: x = 0, y = 400, 100x200 pixels
+	w := f.writes[0]
+	want := []byte{0x02, 0x0c, 0x00, 0x00, 0x90, 0x01, 0x64, 0x00, 0xc8, 0x00}
+	if !bytes.Equal(w[:10], want) {
+		t.Errorf("got header % x, want % x", w[:10], want)
+	}
+}
+
+func TestSetInfoScreenImage(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_NEO)
+	f := &fakeHID{}
+	d.device = f
+
+	if err := d.SetInfoScreenImage(image.NewRGBA(image.Rect(0, 0, 248, 58))); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range f.writes {
+		last := byte(0)
+		if i == len(f.writes)-1 {
+			last = 1
+		}
+		if len(w) != 1024 || w[0] != 0x02 || w[1] != 0x0b || w[2] != 0 || w[3] != last ||
+			int(w[6])|int(w[7])<<8 != i {
+			t.Errorf("report %d has header % x", i, w[:8])
+		}
+	}
+
+	if err := d.SetInfoScreenImage(image.NewRGBA(image.Rect(0, 0, 96, 96))); err == nil {
+		t.Error("expected error for wrong image size")
+	}
+	if err := plusDevice().SetInfoScreenImage(image.NewRGBA(image.Rect(0, 0, 248, 58))); err == nil {
+		t.Error("expected error for device without info screen")
+	}
+}
+
+func TestSetImageNonSquareKeys(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_STUDIO)
+	d.device = &fakeHID{}
+
+	if err := d.SetImage(0, image.NewRGBA(image.Rect(0, 0, 144, 112))); err != nil {
+		t.Error(err)
+	}
+	if err := d.SetImage(0, image.NewRGBA(image.Rect(0, 0, 112, 112))); err == nil {
+		t.Error("expected error for wrong image size")
+	}
+	if err := d.SetImage(32, image.NewRGBA(image.Rect(0, 0, 144, 112))); err == nil {
+		t.Error("expected error for invalid key")
+	}
+}
+
+func TestPedalHasNoDisplay(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_PEDAL)
+	f := &fakeHID{}
+	d.device = f
+
+	if err := d.SetImage(0, image.NewRGBA(image.Rect(0, 0, 72, 72))); err != nil {
+		t.Error(err)
+	}
+	if err := d.Clear(); err != nil {
+		t.Error(err)
+	}
+	if err := d.Reset(); err != nil {
+		t.Error(err)
+	}
+	if err := d.SetBrightness(50); err != nil {
+		t.Error(err)
+	}
+	if len(f.writes) > 0 {
+		t.Errorf("%d reports written to a device without displays", len(f.writes))
+	}
+}
+
+func TestSetKeyColor(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_NEO)
+	f := &fakeHID{}
+	d.device = f
+
+	if err := d.SetKeyColor(8, color.RGBA{R: 0x11, G: 0x22, B: 0x33, A: 0xff}); err != nil {
+		t.Error(err)
+	}
+	want := []byte{0x03, 0x06, 0x08, 0x11, 0x22, 0x33}
+	if len(f.features) != 1 || !bytes.Equal(f.features[0][:6], want) {
+		t.Errorf("got feature reports % x, want % x", f.features, want)
+	}
+
+	if err := d.SetKeyColor(7, color.Black); err == nil {
+		t.Error("expected error for a key that is no touch key")
+	}
+	if err := plusDevice().SetKeyColor(8, color.Black); err == nil {
+		t.Error("expected error for device without touch keys")
+	}
+}
+
+func TestDialRings(t *testing.T) {
+	d := newDevice(PID_STREAMDECK_STUDIO)
+	f := &fakeHID{}
+	d.device = f
+
+	red := color.RGBA{R: 0xff, A: 0xff}
+	if err := d.SetDialRingPercentage(1, red, 50); err != nil {
+		t.Fatal(err)
+	}
+	w := f.writes[0]
+	if len(w) != 1024 || !bytes.Equal(w[:3], []byte{0x02, 0x0f, 0x01}) {
+		t.Fatalf("got report % x", w[:3])
+	}
+	// half of the ring is lit, starting at the right dial's offset of 12
+	for led := range dialRingLEDs {
+		lit := led >= 12
+		if (w[3+led*3] == 0xff) != lit {
+			t.Errorf("LED %d lit: %v, want %v", led, !lit, lit)
+		}
+	}
+
+	if err := d.SetDialKnobColor(0, red); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(f.writes[1][:6], []byte{0x02, 0x10, 0x00, 0xff, 0x00, 0x00}) {
+		t.Errorf("got knob report % x", f.writes[1][:6])
+	}
+
+	if err := d.SetDialRingColor(2, red); err == nil {
+		t.Error("expected error for invalid dial")
+	}
+	if err := plusDevice().SetDialRingColor(0, red); err == nil {
+		t.Error("expected error for device without dial rings")
 	}
 }
